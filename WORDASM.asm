@@ -10,29 +10,30 @@ menu_texto DB 0Dh, 0Ah, 'WORDASM - MENU PRINCIPAL', 0Dh, 0Ah
            DB '2. Abrir archivo existente', 0Dh, 0Ah
            DB 'Seleccione una opcion: $'
 
-nombre_archivo DB 100 DUP(0)   ; Guarda la ruta que el usuario escriba
-mensaje_pedir_archivo DB 0Dh, 0Ah, 'Ingrese nombre del archivo: $'
-nombre_archivo_input DB 100
-                     DB ?
-                     DB 100 DUP(0)
+ prompt     db 0Dh, 0Ah, 'Ingrese la ruta del archivo: $'
+    errOpen    db 0Dh, 0Ah, "Error: no se pudo abrir el archivo.$"
+    errRead    db 0Dh, 0Ah,"Error al leer el archivo.$"
+    ; Búfer para la función 0Ah (lectura de nombre/ruta)
+    filenameBuff db 128, 0, 128 dup(0)
+    ; Búfer para el contenido del archivo
+    fileBuffer   db 1600 dup(0) 
+
+mensaje_guardar DB 0Dh, 0Ah, 'Ingrese el nombre del archivo para guardar: $'
+nombre_archivo_input DB 100, 0, 100 DUP(0)
+nombre_archivo DB 128 DUP(0)
 handle    DW ?
 buffer    DB 80*20 DUP(' ')  ; 20 líneas de 80 columnas
+
 
 .CODE
 
 MAIN PROC NEAR
     MOV AX, @DATA
     MOV DS, AX
-
     
     CALL LimpiarPantalla
     CALL MenuPrincipal
-    CALL LimpiarPantalla
-    CALL DibujarMarco
-    CALL MostrarTitulo
-    CALL MostrarBuffer
-    CALL EditorTexto
-
+  
     MOV AH, 4Ch
     INT 21h
 MAIN ENDP
@@ -140,90 +141,170 @@ MostrarBuffer ENDP
 
 ; === Menú principal ===
 MenuPrincipal PROC NEAR
-    MOV AH, 0
-    MOV AL, 3
-    INT 10h
+    ; Limpiar pantalla (modo texto)
+    mov ah, 0
+    mov al, 3
+    int 10h
 
-    MOV AH, 09h
-    LEA DX, menu_texto
-    INT 21h
+MenuLoop:
+    ; Mostrar texto del menú
+    mov ah, 09h
+    lea dx, menu_texto
+    int 21h
 
+    ; Leer una tecla
+    mov ah, 01h
+    int 21h
 
-leer_opcion:
-    MOV AH, 01h
-    INT 21h
-    CMP AL, '1'
-    JE opcion_nuevo
-    CMP AL, '2'
-    JE opcion_abrir
-    JMP leer_opcion
+    ; Comparar la opción ingresada
+    cmp al, '1'
+    je opcion_nuevo
+
+    cmp al, '2'
+    je opcion_abrir
+
+    ; Si no es una opción válida, volver a mostrar el menú
+    jmp MenuLoop
 
 opcion_nuevo:
-    MOV CX, 1600
-    LEA DI, buffer
-    MOV AL, ' '
-    REP STOSB
-    RET
+    call LimpiarPantalla
+    call DibujarMarco
+    call MostrarTitulo
+    call EditorTexto
 
 opcion_abrir:
-    CALL AbrirArchivo
-    RET
+    call AbrirArchivo
+    call LimpiarPantalla
+    call DibujarMarco
+    call MostrarTitulo
+    call MostrarBuffer
+    call EditorTexto
+
 MenuPrincipal ENDP
 
-
-; === Editor principal ===
 AbrirArchivo PROC
+
+     ; Mostrar prompt
+    mov ah, 9
+    mov dx, OFFSET prompt
+    int 21h
+
+    ; Leer ruta con INT 21h AH=0Ah
+    lea dx, filenameBuff
+    mov ah, 0Ah
+    int 21h
+
+    ; Convertir entrada a ASCIIZ (reemplazar CR final con 0)
+    mov cl, [filenameBuff+1]
+    mov ch, 0
+    lea si, filenameBuff
+    add si, 2
+    add si, cx
+    mov byte ptr [si], 0
+
+
+    ; Abrir archivo en modo lectura (INT 21h AH=3Dh, AL=0)
+    lea dx, filenameBuff+2
+    mov ah, 3Dh
+    mov al, 0
+    int 21h
+    mov bx, ax         ; guardar manejador en BX
+
+    ; Leer contenido del archivo (INT 21h AH=3Fh)
+    mov ah, 3Fh
+    mov cx, 1600
+    lea dx, buffer
+    int 21h
+    mov cx, ax         ; CX = bytes leídos
+
+    RET
+AbrirArchivo ENDP
+
+GuardarArchivo PROC NEAR
+    call LimpiarPantalla
     ; Mostrar mensaje
     MOV AH, 09h
-    LEA DX, mensaje_pedir_archivo
+    LEA DX, mensaje_guardar
     INT 21h
 
-    ; Leer cadena del usuario (INT 21h, función 0Ah)
+    ; Leer nombre de archivo del usuario
     LEA DX, nombre_archivo_input
     MOV AH, 0Ah
     INT 21h
 
-    ; Convertir a formato ASCIIZ para abrir
-    ; nombre_archivo = dirección de texto a partir de offset +2
-    LEA SI, nombre_archivo_input+2
+    ; Limpiar el buffer de destino
     LEA DI, nombre_archivo
-    MOV CX, 100
-copiar_nombre:
-    LODSB
-    CMP AL, 13
-    JE fin_copiar_nombre
-    STOSB
-    LOOP copiar_nombre
-fin_copiar_nombre:
+    MOV CX, 128
     MOV AL, 0
-    STOSB
+    REP STOSB
 
-    ; Abrir archivo
-    MOV AH, 3Dh
-    MOV AL, 0
+    ; Obtener longitud real ingresada
+    XOR CH, CH
+    MOV CL, [nombre_archivo_input + 1]
+    CMP CX, 0
+    JE error_guardar_nombre_vacio
+
+    ; Copiar nombre ingresado
+    LEA SI, [nombre_archivo_input + 2]
+    LEA DI, nombre_archivo
+    MOV BX, CX          ; Guardar longitud
+copiar_nombre:
+    MOV AL, [SI]
+    CMP AL, 13          ; ENTER
+    JE fin_copiar
+    MOV [DI], AL
+    INC SI
+    INC DI
+    LOOP copiar_nombre
+
+fin_copiar:
+    ; Agregar extensión .TXT si no hay punto
+    LEA SI, nombre_archivo
+    MOV CX, BX          ; Recuperar longitud original
+buscar_punto:
+    MOV AL, [SI]
+    CMP AL, '.'
+    JE continuar_guardado  ; Ya tiene extensión
+    CMP AL, 0
+    JE poner_extension     ; Llegamos al final sin punto
+    INC SI
+    LOOP buscar_punto
+
+poner_extension:
+    MOV BYTE PTR [SI], '.'
+    MOV BYTE PTR [SI+1], 'T'
+    MOV BYTE PTR [SI+2], 'X'
+    MOV BYTE PTR [SI+3], 'T'
+    MOV BYTE PTR [SI+4], 0
+
+continuar_guardado:
+    ; Crear archivo
+    MOV AH, 3Ch         ; Función crear archivo
+    XOR CX, CX          ; Atributos normales
     LEA DX, nombre_archivo
     INT 21h
-    JC error_open
-    MOV handle, AX
+    JC error_guardar
+    MOV handle, AX      ; Guardar handle
 
-    ; Leer contenido
-    MOV AH, 3Fh
-    MOV BX, handle
-    LEA DX, buffer
-    MOV CX, 1600
+    ; Escribir contenido
+    MOV AH, 40h         ; Función escribir archivo
+    MOV BX, handle      ; Handle del archivo
+    LEA DX, buffer      ; Buffer de datos
+    MOV CX, 1600        ; Cantidad de bytes a escribir
     INT 21h
 
-    ; Cerrar
-    MOV AH, 3Eh
+    ; Cerrar archivo
+    MOV AH, 3Eh         ; Función cerrar archivo
     MOV BX, handle
     INT 21h
     RET
 
-error_open:
-    ; Podrías mostrar un mensaje de error aquí
+error_guardar_nombre_vacio:
     RET
-AbrirArchivo ENDP
 
+error_guardar:
+    RET
+GuardarArchivo ENDP
 
 EditorTexto PROC NEAR
 
@@ -278,7 +359,9 @@ hacer_nuevalinea:
     JMP loop_input
 
 salir_editor:
-    RET
+    CALL GuardarArchivo
+    MOV AH, 4Ch
+    INT 21h
 EditorTexto ENDP
 ; === Escribir un carácter ===
 EscribirCaracter PROC NEAR
